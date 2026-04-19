@@ -322,11 +322,15 @@
   function positionCanvasRoot() {
     if (!canvasRoot) return;
     const main = document.querySelector('main');
+    const nav = document.querySelector('nav');
     const composer = document.querySelector('form');
     const mainRect = main?.getBoundingClientRect();
+    const navRect = nav?.getBoundingClientRect();
 
-    const left = mainRect ? mainRect.left : 260;
-    const right = mainRect ? Math.max(0, window.innerWidth - mainRect.right) : 0;
+    // main en ChatGPT puede ser una columna centrada; para evitar descuadres
+    // usamos el borde derecho del sidebar como ancla izquierda.
+    const left = navRect ? Math.max(0, navRect.right) : (mainRect ? Math.max(0, mainRect.left) : 260);
+    const right = 0;
     const top = mainRect ? mainRect.top : 0;
     let bottom = 16;
 
