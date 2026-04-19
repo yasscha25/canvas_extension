@@ -196,26 +196,29 @@
   line-height: 1.6;
   color: var(--c-text);
   overflow-y: auto;
-  max-height: 280px;
+  height: 100%;
+  min-height: 64px;
   cursor: text;
   white-space: pre-wrap;
   word-break: break-word;
 }
-.gpt-block-content::-webkit-scrollbar { width: 4px; }
-.gpt-block-content::-webkit-scrollbar-thumb { background: var(--c-border); border-radius: 2px; }
+.gpt-block-content::-webkit-scrollbar { width: 10px; height: 10px; }
+.gpt-block-content::-webkit-scrollbar-track { background: rgba(255,255,255,0.02); border-radius: 8px; }
+.gpt-block-content::-webkit-scrollbar-thumb { background: var(--c-border); border-radius: 8px; }
+.gpt-block-content::-webkit-scrollbar-thumb:hover { background: #4a4a57; }
 
 .gpt-generating { color: var(--c-text-muted); font-style: italic; font-size: 12px; }
 
 .gpt-block-resize-handle {
   position: absolute; right: 0; bottom: 0;
-  width: 14px; height: 14px; cursor: se-resize;
-  opacity: 0; transition: opacity 0.2s;
+  width: 22px; height: 22px; cursor: se-resize;
+  opacity: 0.45; transition: opacity 0.2s;
 }
 .gpt-block-resize-handle::after {
   content: ''; position: absolute; right: 3px; bottom: 3px;
-  width: 8px; height: 8px;
-  border-right: 2px solid var(--c-text-muted);
-  border-bottom: 2px solid var(--c-text-muted);
+  width: 12px; height: 12px;
+  border-right: 2px solid #a7a7bd;
+  border-bottom: 2px solid #a7a7bd;
   border-radius: 0 0 2px 0;
 }
 .gpt-block:hover .gpt-block-resize-handle { opacity: 1; }
@@ -229,7 +232,7 @@
   position: absolute;
   min-width: 160px; min-height: 48px;
   background: var(--c-note-bg); color: var(--c-note-text);
-  border-radius: 6px; padding: 10px 12px;
+  border-radius: 6px; padding: 12px;
   font-size: 13px; line-height: 1.5;
   box-shadow: 0 2px 12px rgba(0,0,0,0.25);
   border: 1px solid rgba(0,0,0,0.1);
@@ -237,6 +240,36 @@
   white-space: pre-wrap; word-break: break-word;
 }
 .gpt-text-note:focus { box-shadow: 0 0 0 2px var(--c-fork), 0 2px 12px rgba(0,0,0,0.25); }
+
+.gpt-text-note-editor {
+  min-width: 140px;
+  min-height: 28px;
+  cursor: text;
+  outline: none;
+}
+
+.gpt-text-note-close {
+  position: absolute;
+  top: 4px;
+  right: 6px;
+  border: none;
+  background: transparent;
+  color: rgba(0,0,0,0.55);
+  font-size: 12px;
+  width: 18px;
+  height: 18px;
+  border-radius: 4px;
+  cursor: pointer;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.gpt-text-note-close:hover {
+  background: rgba(0,0,0,0.1);
+  color: rgba(0,0,0,0.8);
+}
 
 /* ─── Indicador de bifurcación ───────────────────────────────── */
 #gpt-fork-indicator {
