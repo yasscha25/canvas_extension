@@ -24,6 +24,7 @@
     canvasOffset: { x: 0, y: 0 },
     panState: null,
     idCounter: 0,
+    rehydrating: false,
   };
 
   // ─── Constantes de layout ─────────────────────────────────────────────────
@@ -134,6 +135,7 @@
   }
 
   function syncMessagesToBlocks() {
+    if (state.rehydrating) return;
     const turns = getConversationTurns();
     if (turns.length === 0) return;
 
@@ -896,6 +898,7 @@
   function enableCanvas() {
     console.log('[Canvas] enableCanvas() llamado');
     state.enabled = true;
+    state.rehydrating = true;
     state.currentChatId = getChatId();
     chrome.storage.local.set({ canvasEnabled: true });
 
@@ -909,8 +912,12 @@
       if (hadSaved) {
         renderAllBlocks();
         lastKnownTurnCount = state.blocks.length;
+        state.rehydrating = false;
       } else {
-        setTimeout(() => importExistingConversation(), 500);
+        setTimeout(() => {
+          importExistingConversation();
+          state.rehydrating = false;
+        }, 500);
       }
       startMessageObserver();
     });
@@ -918,6 +925,7 @@
 
   function disableCanvas() {
     state.enabled = false;
+    state.rehydrating = false;
     if (messageObserver) messageObserver.disconnect();
     removeCanvas();
     chrome.storage.local.set({ canvasEnabled: false });
@@ -941,6 +949,7 @@
       lastUrl = location.href;
       if (state.enabled) {
         saveState();
+        state.rehydrating = true;
         state.currentChatId = getChatId();
         removeCanvas();
         setTimeout(() => {
@@ -949,8 +958,10 @@
             if (hadSaved) {
               renderAllBlocks();
               lastKnownTurnCount = state.blocks.length;
+              state.rehydrating = false;
             } else {
               importExistingConversation();
+              state.rehydrating = false;
             }
           });
         }, 800); // esperar a que el DOM de ChatGPT se actualice
