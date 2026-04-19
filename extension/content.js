@@ -119,6 +119,12 @@
 
   function syncMessagesToBlocks() {
     const turns = getConversationTurns();
+    if (turns.length === 0) return;
+
+    // Actualizar bloques existentes cuando una respuesta pasa de "Generando..."
+    // a texto final sin crear un turno nuevo.
+    updateExistingBlocksFromTurns(turns);
+
     if (turns.length === lastKnownTurnCount) return;
 
     const newTurns = turns.slice(lastKnownTurnCount);
@@ -152,6 +158,32 @@
       renderConnections();
       saveState();
     });
+  }
+
+  function updateExistingBlocksFromTurns(turns) {
+    const max = Math.min(turns.length, state.blocks.length);
+    let changed = false;
+
+    for (let i = 0; i < max; i++) {
+      const turn = turns[i];
+      const block = state.blocks[i];
+      if (!turn || !block) continue;
+
+      // Sólo forzar update cuando ya tenemos texto real del assistant.
+      if (turn.gptMsg && turn.gptMsg !== block.gptMsg) {
+        block.gptMsg = turn.gptMsg;
+        updateBlockContent(block.id, turn.gptMsg);
+        changed = true;
+      }
+    }
+
+    if (changed) saveState();
+  }
+
+  function updateBlockContent(blockId, content) {
+    const contentEl = document.querySelector(`#block-${blockId} .gpt-block-content`);
+    if (!contentEl) return;
+    contentEl.textContent = content;
   }
 
   function calcNewBlockPosition(parentId) {
@@ -829,6 +861,10 @@
   function makeDraggable(el, onMove) {
     let dragging = false, sx, sy, ox, oy;
     el.addEventListener('mousedown', (e) => {
+      // En notas de texto: permitir escribir/seleccionar texto y pulsar cerrar.
+      if (e.target.closest('.gpt-text-note-editor') || e.target.closest('.gpt-text-note-close')) {
+        return;
+      }
       dragging = true;
       sx = e.clientX; sy = e.clientY;
       ox = parseInt(el.style.left) || 0;
