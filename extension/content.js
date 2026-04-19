@@ -24,6 +24,7 @@
     canvasOffset: { x: 0, y: 0 },
     panState: null,
     idCounter: 0,
+    rehydrating: false,
   };
 
   // ─── Constantes de layout ─────────────────────────────────────────────────
@@ -36,6 +37,7 @@
 
   // ─── Elementos DOM principales ────────────────────────────────────────────
   let canvasRoot, svgLayer, blocksLayer, toolbarEl, drawCanvas, drawCtx;
+  let resizeHandler = null;
 
   // ─── Utilidades ───────────────────────────────────────────────────────────
   function uid() { return 'b' + (++state.idCounter) + '_' + Date.now(); }
@@ -133,6 +135,7 @@
   }
 
   function syncMessagesToBlocks() {
+    if (state.rehydrating) return;
     const turns = getConversationTurns();
     if (turns.length === 0) return;
 
@@ -220,9 +223,12 @@
 
     // Contar hijos existentes para desplazar verticalmente
     const siblings = state.blocks.filter(b => b.parentId === parentId);
+    const nextY = siblings.length === 0
+      ? parent.y
+      : Math.max(...siblings.map(s => s.y + (s.h || BLOCK_H))) + V_GAP;
     return {
       x: parent.x + BLOCK_W + H_GAP,
-      y: parent.y + siblings.length * (BLOCK_H + V_GAP),
+      y: nextY,
     };
   }
 
@@ -300,12 +306,42 @@
     drawCtx     = drawCanvas.getContext('2d');
 
     resizeDrawCanvas();
+    positionCanvasRoot();
     bindToolbarEvents();
     bindViewportEvents();
     applyCanvasOffset();
     toggleNativeJumpToBottom(true);
-    window.addEventListener('resize', resizeDrawCanvas);
+    resizeHandler = () => {
+      positionCanvasRoot();
+      resizeDrawCanvas();
+    };
+    window.addEventListener('resize', resizeHandler);
     console.log('[Canvas] Canvas listo ✓');
+  }
+
+  function positionCanvasRoot() {
+    if (!canvasRoot) return;
+    const main = document.querySelector('main');
+    const composer = document.querySelector('form');
+    const mainRect = main?.getBoundingClientRect();
+
+    const left = mainRect ? mainRect.left : 260;
+    const right = mainRect ? Math.max(0, window.innerWidth - mainRect.right) : 0;
+    const top = mainRect ? mainRect.top : 0;
+    let bottom = 16;
+
+    if (composer) {
+      const cRect = composer.getBoundingClientRect();
+      bottom = Math.max(12, window.innerHeight - cRect.top + 8);
+    }
+
+    canvasRoot.style.position = 'fixed';
+    canvasRoot.style.left = `${Math.max(0, left)}px`;
+    canvasRoot.style.right = `${Math.max(0, right)}px`;
+    canvasRoot.style.top = `${Math.max(0, top)}px`;
+    canvasRoot.style.bottom = `${Math.max(12, bottom)}px`;
+    canvasRoot.style.height = 'auto';
+    canvasRoot.style.zIndex = '40';
   }
 
   function findComposerHost(container) {
@@ -365,7 +401,8 @@
     if (ind) ind.remove();
     toggleNativeJumpToBottom(false);
     canvasRoot = svgLayer = blocksLayer = toolbarEl = drawCanvas = drawCtx = null;
-    window.removeEventListener('resize', resizeDrawCanvas);
+    if (resizeHandler) window.removeEventListener('resize', resizeHandler);
+    resizeHandler = null;
     console.log('[Canvas] Canvas eliminado');
   }
 
@@ -861,6 +898,7 @@
   function enableCanvas() {
     console.log('[Canvas] enableCanvas() llamado');
     state.enabled = true;
+    state.rehydrating = true;
     state.currentChatId = getChatId();
     chrome.storage.local.set({ canvasEnabled: true });
 
@@ -874,8 +912,12 @@
       if (hadSaved) {
         renderAllBlocks();
         lastKnownTurnCount = state.blocks.length;
+        state.rehydrating = false;
       } else {
-        setTimeout(() => importExistingConversation(), 500);
+        setTimeout(() => {
+          importExistingConversation();
+          state.rehydrating = false;
+        }, 500);
       }
       startMessageObserver();
     });
@@ -883,6 +925,7 @@
 
   function disableCanvas() {
     state.enabled = false;
+    state.rehydrating = false;
     if (messageObserver) messageObserver.disconnect();
     removeCanvas();
     chrome.storage.local.set({ canvasEnabled: false });
@@ -906,6 +949,7 @@
       lastUrl = location.href;
       if (state.enabled) {
         saveState();
+        state.rehydrating = true;
         state.currentChatId = getChatId();
         removeCanvas();
         setTimeout(() => {
@@ -914,8 +958,10 @@
             if (hadSaved) {
               renderAllBlocks();
               lastKnownTurnCount = state.blocks.length;
+              state.rehydrating = false;
             } else {
               importExistingConversation();
+              state.rehydrating = false;
             }
           });
         }, 800); // esperar a que el DOM de ChatGPT se actualice
