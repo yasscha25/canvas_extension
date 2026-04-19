@@ -1,7 +1,7 @@
 /**
  * ChatGPT Canvas — content.js
  * Núcleo principal de la extensión.
- * Reemplaza la zona central de ChatGPT con un canvas visual de bloques interconectados.
+ * Inserta un canvas visual sobre la conversación, manteniendo visible la barra de escritura nativa.
  */
 
 (function () {
@@ -11,6 +11,7 @@
   const state = {
     enabled: false,
     blocks: [],          // { id, userMsg, gptMsg, parentId, x, y, w, h, minimized, highlights }
+    notes: [],           // { id, x, y, html }
     connections: [],     // { fromId, toId }
     pendingParentId: null, // bloque marcado para bifurcación
     currentChatId: null,
@@ -50,9 +51,11 @@
   function saveState() {
     const data = {
       blocks: state.blocks,
+      notes: state.notes,
       connections: state.connections,
       idCounter: state.idCounter,
       canvasOffset: state.canvasOffset,
+      pendingParentId: state.pendingParentId,
     };
     chrome.storage.local.set({ [storageKey()]: data });
   }
@@ -62,9 +65,19 @@
       const data = res[storageKey()];
       if (data) {
         state.blocks = data.blocks || [];
+        state.notes = data.notes || [];
         state.connections = data.connections || [];
         state.idCounter = data.idCounter || 0;
         state.canvasOffset = data.canvasOffset || { x: 0, y: 0 };
+        state.pendingParentId = data.pendingParentId || null;
+      } else {
+        // Evitar arrastrar estado de otro chat cuando no hay guardado.
+        state.blocks = [];
+        state.notes = [];
+        state.connections = [];
+        state.idCounter = 0;
+        state.canvasOffset = { x: 0, y: 0 };
+        state.pendingParentId = null;
       }
       cb && cb(!!data);
     });
@@ -119,6 +132,12 @@
 
   function syncMessagesToBlocks() {
     const turns = getConversationTurns();
+    if (turns.length === 0) return;
+
+    // Actualizar bloques existentes cuando una respuesta pasa de "Generando..."
+    // a texto final sin crear un turno nuevo.
+    updateExistingBlocksFromTurns(turns);
+
     if (turns.length === lastKnownTurnCount) return;
 
     const newTurns = turns.slice(lastKnownTurnCount);
@@ -134,6 +153,8 @@
         id: uid(),
         userMsg: turn.userMsg,
         gptMsg: turn.gptMsg,
+        contentHtml: turn.gptMsg ? escapeHtml(turn.gptMsg) : '<span class="gpt-generating">Generando...</span>',
+        annotated: false,
         parentId: parentId,
         x: pos.x,
         y: pos.y,
@@ -152,6 +173,35 @@
       renderConnections();
       saveState();
     });
+  }
+
+  function updateExistingBlocksFromTurns(turns) {
+    const max = Math.min(turns.length, state.blocks.length);
+    let changed = false;
+
+    for (let i = 0; i < max; i++) {
+      const turn = turns[i];
+      const block = state.blocks[i];
+      if (!turn || !block) continue;
+
+      // Sólo forzar update cuando ya tenemos texto real del assistant.
+      if (turn.gptMsg && turn.gptMsg !== block.gptMsg) {
+        block.gptMsg = turn.gptMsg;
+        if (!block.annotated) {
+          block.contentHtml = escapeHtml(turn.gptMsg);
+        }
+        updateBlockContent(block.id, block.contentHtml || escapeHtml(turn.gptMsg));
+        changed = true;
+      }
+    }
+
+    if (changed) saveState();
+  }
+
+  function updateBlockContent(blockId, contentHtml) {
+    const contentEl = document.querySelector(`#block-${blockId} .gpt-block-content`);
+    if (!contentEl) return;
+    contentEl.innerHTML = contentHtml;
   }
 
   function calcNewBlockPosition(parentId) {
@@ -228,7 +278,12 @@
     const container = findChatContainer();
     if (container) {
       hideNativeChildren(container, true);
-      container.insertBefore(canvasRoot, container.firstChild);
+      const composerHost = findComposerHost(container);
+      if (composerHost) {
+        container.insertBefore(canvasRoot, composerHost);
+      } else {
+        container.insertBefore(canvasRoot, container.firstChild);
+      }
       console.log('[Canvas] Insertado dentro del container de ChatGPT');
     } else {
       console.warn('[Canvas] Fallback: insertando en body');
@@ -246,14 +301,44 @@
     bindToolbarEvents();
     bindViewportEvents();
     applyCanvasOffset();
+    toggleNativeJumpToBottom(true);
     window.addEventListener('resize', resizeDrawCanvas);
     console.log('[Canvas] Canvas listo ✓');
   }
 
+  function findComposerHost(container) {
+    if (!container) return null;
+    return Array.from(container.children).find((child) => {
+      if (child.id === 'gpt-canvas-root') return false;
+      return child.matches('form') || !!child.querySelector('form textarea, form [contenteditable="true"]');
+    }) || null;
+  }
+
+  function isConversationChild(child) {
+    if (!child) return false;
+    if (child.matches('[data-testid="conversation-turns"]')) return true;
+    if ((child.getAttribute('data-testid') || '').startsWith('conversation')) return true;
+    if (child.querySelector('[data-testid="conversation-turns"]')) return true;
+    if (child.querySelector('article[data-testid^="conversation-turn"]')) return true;
+    if (child.querySelector('[data-message-author-role="assistant"], [data-message-author-role="user"]')) return true;
+    return false;
+  }
+
+  function shouldHideChild(child, composerHost) {
+    if (!child || child.id === 'gpt-canvas-root') return false;
+    if (composerHost && child === composerHost) return false;
+    // Nunca ocultar la zona del composer/input nativo de ChatGPT.
+    if (child.matches('form')) return false;
+    if (child.querySelector('form textarea, form [contenteditable="true"]')) return false;
+    // Solo ocultar capas de conversación, no toda la página.
+    return isConversationChild(child);
+  }
+
   function hideNativeChildren(container, hide) {
     if (!container) return;
+    const composerHost = findComposerHost(container);
     Array.from(container.children).forEach(child => {
-      if (child.id === 'gpt-canvas-root') return;
+      if (!shouldHideChild(child, composerHost)) return;
       if (hide) {
         child.dataset.gptHidden = '1';
         child.dataset.gptOrigDisplay = child.style.display || '';
@@ -276,9 +361,27 @@
     }
     const ind = document.getElementById('gpt-fork-indicator');
     if (ind) ind.remove();
+    toggleNativeJumpToBottom(false);
     canvasRoot = svgLayer = blocksLayer = toolbarEl = drawCanvas = drawCtx = null;
     window.removeEventListener('resize', resizeDrawCanvas);
     console.log('[Canvas] Canvas eliminado');
+  }
+
+  function toggleNativeJumpToBottom(hide) {
+    const selectors = [
+      'button[aria-label*="bottom" i]',
+      'button[data-testid*="jump" i]',
+      'button[data-testid*="scroll-to-bottom" i]',
+    ];
+    document.querySelectorAll(selectors.join(',')).forEach((btn) => {
+      if (hide) {
+        btn.dataset.gptOrigDisplay = btn.style.display || '';
+        btn.style.setProperty('display', 'none', 'important');
+      } else if (btn.dataset.gptOrigDisplay !== undefined) {
+        btn.style.display = btn.dataset.gptOrigDisplay;
+        delete btn.dataset.gptOrigDisplay;
+      }
+    });
   }
 
   // ─── Toolbar ──────────────────────────────────────────────────────────────
@@ -348,15 +451,33 @@
       if (state.annotationMode === 'draw') {
         startDrawing(e); return;
       }
-      if (state.annotationMode === 'text' && e.target === vp) {
-        spawnTextNote(e); return;
+      if (state.annotationMode === 'text') {
+        const clickedCanvasBg =
+          e.target === vp ||
+          e.target === svgLayer ||
+          e.target === drawCanvas ||
+          e.target === blocksLayer;
+        if (clickedCanvasBg) {
+          spawnTextNote(e);
+          return;
+        }
       }
-      if (e.target === vp || e.target === svgLayer || e.target === drawCanvas) {
+      if (e.target === vp || e.target === svgLayer || e.target === drawCanvas || e.target === blocksLayer) {
         // Pan
         state.panState = { startX: e.clientX, startY: e.clientY, ox: state.canvasOffset.x, oy: state.canvasOffset.y };
         vp.style.cursor = 'grabbing';
       }
     });
+
+    vp.addEventListener('wheel', (e) => {
+      if (!state.enabled) return;
+      // Desplazamiento libre con rueda/trackpad dentro del canvas.
+      state.canvasOffset.x -= e.deltaX;
+      state.canvasOffset.y -= e.deltaY;
+      applyCanvasOffset();
+      saveState();
+      e.preventDefault();
+    }, { passive: false });
 
     window.addEventListener('mousemove', (e) => {
       if (state.drawing) { continueDrawing(e); return; }
@@ -441,16 +562,59 @@
     const x = e.clientX - rect.left - state.canvasOffset.x;
     const y = e.clientY - rect.top  - state.canvasOffset.y;
 
+    const noteData = {
+      id: uid(),
+      x,
+      y,
+      html: '',
+    };
+    state.notes.push(noteData);
+    const noteEl = renderTextNote(noteData);
+    const editor = noteEl?.querySelector('.gpt-text-note-editor');
+    if (editor) editor.focus();
+    saveState();
+  }
+
+  function renderTextNote(noteData) {
+    if (!blocksLayer || !noteData) return null;
     const note = document.createElement('div');
     note.className = 'gpt-text-note';
-    note.style.left = x + 'px';
-    note.style.top  = y + 'px';
-    note.contentEditable = 'true';
-    note.textContent = '';
-    note.addEventListener('blur', saveState);
-    makeDraggable(note, null);
+    note.dataset.noteId = noteData.id;
+    note.style.left = noteData.x + 'px';
+    note.style.top  = noteData.y + 'px';
+    note.innerHTML = `
+      <button class="gpt-text-note-close" title="Eliminar nota" aria-label="Eliminar nota">✕</button>
+      <div class="gpt-text-note-editor" contenteditable="true">${noteData.html || ''}</div>
+    `;
+
+    const editor = note.querySelector('.gpt-text-note-editor');
+    const closeBtn = note.querySelector('.gpt-text-note-close');
+    editor.addEventListener('mousedown', (ev) => ev.stopPropagation());
+    editor.addEventListener('click', (ev) => ev.stopPropagation());
+    editor.addEventListener('blur', () => {
+      const n = state.notes.find(item => item.id === noteData.id);
+      if (n) n.html = editor.innerHTML;
+      saveState();
+    });
+    closeBtn.addEventListener('click', (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      state.notes = state.notes.filter(n => n.id !== noteData.id);
+      note.remove();
+      saveState();
+    });
+    makeDraggable(
+      note,
+      () => {
+        const n = state.notes.find(item => item.id === noteData.id);
+        if (!n) return;
+        n.x = parseInt(note.style.left, 10) || 0;
+        n.y = parseInt(note.style.top, 10) || 0;
+      },
+      saveState
+    );
     blocksLayer.appendChild(note);
-    note.focus();
+    return note;
   }
 
   // ─── Bloques ──────────────────────────────────────────────────────────────
@@ -458,7 +622,9 @@
     if (!blocksLayer) return;
     blocksLayer.innerHTML = '';
     state.blocks.forEach(renderBlock);
+    state.notes.forEach(renderTextNote);
     renderConnections();
+    applyPendingForkUI();
   }
 
   function renderBlock(block) {
@@ -481,7 +647,7 @@
         </div>
       </div>
       <div class="gpt-block-body">
-        <div class="gpt-block-content">${block.gptMsg || '<span class="gpt-generating">Generando...</span>'}</div>
+        <div class="gpt-block-content">${block.contentHtml || (block.gptMsg ? escapeHtml(block.gptMsg) : '<span class="gpt-generating">Generando...</span>')}</div>
       </div>
       <div class="gpt-block-resize-handle"></div>
     `;
@@ -501,7 +667,8 @@
     });
 
     // Resaltado / subrayado al seleccionar texto
-    el.querySelector('.gpt-block-content').addEventListener('mouseup', () => {
+    const blockContentEl = el.querySelector('.gpt-block-content');
+    blockContentEl.addEventListener('mouseup', () => {
       if (!state.markMode) return;
       const sel = window.getSelection();
       if (!sel || sel.isCollapsed) return;
@@ -510,6 +677,8 @@
       span.className = state.markMode === 'highlight' ? 'gpt-highlight' : 'gpt-underline';
       range.surroundContents(span);
       sel.removeAllRanges();
+      block.contentHtml = blockContentEl.innerHTML;
+      block.annotated = true;
       saveState();
     });
 
@@ -565,6 +734,7 @@
 
     // Indicador visual en la barra de input
     showForkIndicator(block.userMsg);
+    saveState();
   }
 
   function showForkIndicator(title) {
@@ -584,6 +754,16 @@
     document.querySelectorAll('.gpt-block.fork-pending').forEach(b => b.classList.remove('fork-pending'));
     const ind = document.getElementById('gpt-fork-indicator');
     if (ind) ind.classList.remove('visible');
+    saveState();
+  }
+
+  function applyPendingForkUI() {
+    if (!state.pendingParentId) return;
+    const block = state.blocks.find((b) => b.id === state.pendingParentId);
+    const blockEl = document.getElementById('block-' + state.pendingParentId);
+    if (!block || !blockEl) return;
+    blockEl.classList.add('fork-pending');
+    showForkIndicator(block.userMsg || 'mensaje');
   }
 
   // ─── Conexiones SVG ───────────────────────────────────────────────────────
@@ -627,13 +807,20 @@
   // ─── Importar conversación existente ─────────────────────────────────────
   function importExistingConversation() {
     const turns = getConversationTurns();
-    if (turns.length === 0) return;
 
     // Reset
     state.blocks = [];
+    state.notes = [];
     state.connections = [];
     state.idCounter = 0;
+    state.pendingParentId = null;
     lastKnownTurnCount = 0;
+
+    if (turns.length === 0) {
+      renderAllBlocks();
+      saveState();
+      return;
+    }
 
     // Construir árbol lineal (no tenemos info de bifurcaciones pasadas)
     let prevId = null;
@@ -643,6 +830,8 @@
         id: uid(),
         userMsg: turn.userMsg,
         gptMsg: turn.gptMsg,
+        contentHtml: turn.gptMsg ? escapeHtml(turn.gptMsg) : '<span class="gpt-generating">Generando...</span>',
+        annotated: false,
         parentId: prevId,
         x: pos.x,
         y: pos.y,
@@ -744,9 +933,14 @@
       .replace(/"/g, '&quot;');
   }
 
-  function makeDraggable(el, onMove) {
+  function makeDraggable(el, onMove, onEnd) {
     let dragging = false, sx, sy, ox, oy;
     el.addEventListener('mousedown', (e) => {
+      // En notas de texto: permitir escribir/seleccionar texto y pulsar cerrar.
+      const targetEl = e.target instanceof Element ? e.target : null;
+      if (targetEl && (targetEl.closest('.gpt-text-note-editor') || targetEl.closest('.gpt-text-note-close'))) {
+        return;
+      }
       dragging = true;
       sx = e.clientX; sy = e.clientY;
       ox = parseInt(el.style.left) || 0;
@@ -759,7 +953,11 @@
       el.style.top  = (oy + e.clientY - sy) + 'px';
       onMove && onMove();
     });
-    window.addEventListener('mouseup', () => { dragging = false; });
+    window.addEventListener('mouseup', () => {
+      if (!dragging) return;
+      dragging = false;
+      onEnd && onEnd();
+    });
   }
 
 })();
