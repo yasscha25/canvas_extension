@@ -1,0 +1,260 @@
+/* ============================================================
+   ChatGPT Canvas — styles.css v2
+   El canvas convive con sidebar y barra de input de ChatGPT.
+   ============================================================ */
+
+:root {
+  --c-bg:         #0f0f11;
+  --c-surface:    #1a1a1f;
+  --c-surface2:   #222228;
+  --c-border:     #2e2e38;
+  --c-text:       #e8e8f0;
+  --c-text-muted: #7b7b8f;
+  --c-accent:     #6366f1;
+  --c-accent-2:   #818cf8;
+  --c-fork:       #f59e0b;
+  --c-highlight:  rgba(251,191,36,0.35);
+  --c-underline:  #f59e0b;
+  --c-danger:     #ef4444;
+  --c-note-bg:    #fefce8;
+  --c-note-text:  #1c1917;
+  --radius:       10px;
+  --shadow:       0 4px 24px rgba(0,0,0,0.45);
+  --font-ui:      'SF Pro Display','Segoe UI',system-ui,sans-serif;
+  --toolbar-h:    48px;
+}
+
+/* ─── El canvas se inserta como hijo directo del main container de ChatGPT ── */
+/* Ocupa todo el espacio disponible en el centro, respetando sidebar e input  */
+#gpt-canvas-root {
+  display: flex !important;
+  flex-direction: column !important;
+  flex: 1 1 0% !important;
+  min-width: 0 !important;
+  height: 100% !important;
+  background: var(--c-bg) !important;
+  font-family: var(--font-ui) !important;
+  box-sizing: border-box !important;
+  overflow: hidden !important;
+  position: relative !important;
+  z-index: 10 !important;
+}
+
+/* ─── Toolbar ────────────────────────────────────────────────── */
+#gpt-canvas-toolbar {
+  height: var(--toolbar-h);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 16px;
+  background: var(--c-surface);
+  border-bottom: 1px solid var(--c-border);
+  flex-shrink: 0;
+  user-select: none;
+  z-index: 20;
+  position: relative;
+}
+
+.gpt-canvas-logo {
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--c-accent-2);
+}
+
+.gpt-canvas-tools {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.gpt-tool {
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--c-text-muted);
+  cursor: pointer;
+  font-size: 14px;
+  font-family: var(--font-ui);
+  height: 30px;
+  min-width: 30px;
+  padding: 0 8px;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.gpt-tool:hover { background: var(--c-surface2); color: var(--c-text); border-color: var(--c-border); }
+.gpt-tool.active { background: var(--c-accent); color: #fff; border-color: var(--c-accent); }
+.gpt-tool-sep { width: 1px; height: 20px; background: var(--c-border); margin: 0 4px; }
+.gpt-tool-close:hover { background: var(--c-danger) !important; color: #fff !important; border-color: var(--c-danger) !important; }
+
+/* ─── Viewport ───────────────────────────────────────────────── */
+#gpt-canvas-viewport {
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+  cursor: grab;
+}
+#gpt-canvas-viewport:active { cursor: grabbing; }
+
+/* ─── SVG de conexiones ──────────────────────────────────────── */
+#gpt-svg-layer {
+  position: absolute;
+  top: 0; left: 0;
+  width: 9000px; height: 9000px;
+  pointer-events: none;
+  transform-origin: 0 0;
+  z-index: 1;
+}
+
+/* ─── Capa de bloques ────────────────────────────────────────── */
+#gpt-blocks-layer {
+  position: absolute;
+  top: 0; left: 0;
+  width: 9000px; height: 9000px;
+  transform-origin: 0 0;
+  z-index: 2;
+}
+
+/* ─── Canvas de dibujo ───────────────────────────────────────── */
+#gpt-draw-canvas {
+  position: absolute;
+  top: 0; left: 0;
+  pointer-events: none;
+  z-index: 3;
+  transform-origin: 0 0;
+}
+
+/* ─── Bloques de conversación ────────────────────────────────── */
+.gpt-block {
+  position: absolute;
+  width: 360px;
+  border-radius: var(--radius);
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  box-shadow: var(--shadow);
+  display: flex;
+  flex-direction: column;
+  transition: border-color 0.2s, box-shadow 0.2s;
+  z-index: 10;
+  min-height: 80px;
+}
+.gpt-block:hover { border-color: var(--c-accent); box-shadow: 0 4px 32px rgba(99,102,241,0.18); }
+.gpt-block.fork-pending { border-color: var(--c-fork); box-shadow: 0 0 0 2px rgba(245,158,11,0.3), var(--shadow); }
+
+.gpt-block-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px 8px;
+  border-bottom: 1px solid var(--c-border);
+  cursor: move;
+  gap: 8px;
+  border-radius: var(--radius) var(--radius) 0 0;
+  background: var(--c-surface2);
+}
+
+.gpt-block-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--c-text);
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.gpt-block-actions { display: flex; gap: 4px; flex-shrink: 0; }
+
+.gpt-block-btn {
+  background: none;
+  border: 1px solid var(--c-border);
+  border-radius: 5px;
+  color: var(--c-text-muted);
+  cursor: pointer;
+  font-size: 13px;
+  height: 22px;
+  min-width: 22px;
+  padding: 0 5px;
+  transition: background 0.12s, color 0.12s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.gpt-block-btn:hover { background: var(--c-border); color: var(--c-text); }
+.btn-fork { border-color: var(--c-fork) !important; color: var(--c-fork) !important; font-weight: 700; font-size: 16px; }
+.btn-fork:hover { background: var(--c-fork) !important; color: #000 !important; }
+
+.gpt-block-body { flex: 1; overflow: hidden; display: flex; flex-direction: column; }
+.gpt-block.minimized .gpt-block-body { display: none; }
+.gpt-block.minimized { min-height: 0; }
+
+.gpt-block-content {
+  padding: 12px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--c-text);
+  overflow-y: auto;
+  max-height: 280px;
+  cursor: text;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.gpt-block-content::-webkit-scrollbar { width: 4px; }
+.gpt-block-content::-webkit-scrollbar-thumb { background: var(--c-border); border-radius: 2px; }
+
+.gpt-generating { color: var(--c-text-muted); font-style: italic; font-size: 12px; }
+
+.gpt-block-resize-handle {
+  position: absolute; right: 0; bottom: 0;
+  width: 14px; height: 14px; cursor: se-resize;
+  opacity: 0; transition: opacity 0.2s;
+}
+.gpt-block-resize-handle::after {
+  content: ''; position: absolute; right: 3px; bottom: 3px;
+  width: 8px; height: 8px;
+  border-right: 2px solid var(--c-text-muted);
+  border-bottom: 2px solid var(--c-text-muted);
+  border-radius: 0 0 2px 0;
+}
+.gpt-block:hover .gpt-block-resize-handle { opacity: 1; }
+
+/* ─── Resaltado y subrayado ──────────────────────────────────── */
+.gpt-highlight { background: var(--c-highlight); border-radius: 3px; padding: 0 2px; }
+.gpt-underline { text-decoration: underline; text-decoration-color: var(--c-underline); text-underline-offset: 3px; text-decoration-thickness: 2px; }
+
+/* ─── Notas de texto ─────────────────────────────────────────── */
+.gpt-text-note {
+  position: absolute;
+  min-width: 160px; min-height: 48px;
+  background: var(--c-note-bg); color: var(--c-note-text);
+  border-radius: 6px; padding: 10px 12px;
+  font-size: 13px; line-height: 1.5;
+  box-shadow: 0 2px 12px rgba(0,0,0,0.25);
+  border: 1px solid rgba(0,0,0,0.1);
+  cursor: move; z-index: 20; outline: none;
+  white-space: pre-wrap; word-break: break-word;
+}
+.gpt-text-note:focus { box-shadow: 0 0 0 2px var(--c-fork), 0 2px 12px rgba(0,0,0,0.25); }
+
+/* ─── Indicador de bifurcación ───────────────────────────────── */
+#gpt-fork-indicator {
+  position: fixed;
+  bottom: 100px;
+  left: 50%; transform: translateX(-50%) translateY(20px);
+  background: var(--c-surface2);
+  border: 1px solid var(--c-fork);
+  border-radius: 8px; padding: 8px 14px;
+  font-size: 13px; color: var(--c-text);
+  display: flex; align-items: center; gap: 10px;
+  z-index: 999999;
+  opacity: 0; pointer-events: none;
+  transition: opacity 0.2s, transform 0.2s;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+  white-space: nowrap;
+}
+#gpt-fork-indicator.visible { opacity: 1; transform: translateX(-50%) translateY(0); pointer-events: all; }
+#gpt-fork-indicator strong { color: var(--c-fork); }
+#gpt-fork-cancel { background: none; border: none; color: var(--c-text-muted); cursor: pointer; font-size: 14px; padding: 0; }
+#gpt-fork-cancel:hover { color: var(--c-danger); }
