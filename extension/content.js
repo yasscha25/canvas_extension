@@ -42,7 +42,9 @@
 
   function getChatId() {
     const m = location.pathname.match(/\/c\/([a-zA-Z0-9\-_]+)/);
-    return m ? m[1] : '__default__';
+    if (m) return m[1];
+    // Fallback robusto para rutas sin /c/<id>.
+    return `path_${location.pathname}${location.search}`;
   }
 
   function storageKey() { return 'canvas_' + state.currentChatId; }
@@ -589,8 +591,13 @@
 
     const editor = note.querySelector('.gpt-text-note-editor');
     const closeBtn = note.querySelector('.gpt-text-note-close');
+    editor.setAttribute('contenteditable', 'true');
+    editor.style.pointerEvents = 'auto';
     editor.addEventListener('mousedown', (ev) => ev.stopPropagation());
-    editor.addEventListener('click', (ev) => ev.stopPropagation());
+    editor.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      editor.focus();
+    });
     editor.addEventListener('blur', () => {
       const n = state.notes.find(item => item.id === noteData.id);
       if (n) n.html = editor.innerHTML;
@@ -893,10 +900,10 @@
   });
 
   // ─── Detectar cambio de chat (SPA navigation) ─────────────────────────────
-  let lastPath = location.pathname;
+  let lastUrl = location.href;
   const navObserver = new MutationObserver(() => {
-    if (location.pathname !== lastPath) {
-      lastPath = location.pathname;
+    if (location.href !== lastUrl) {
+      lastUrl = location.href;
       if (state.enabled) {
         saveState();
         state.currentChatId = getChatId();
