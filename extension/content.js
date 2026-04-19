@@ -11,6 +11,7 @@
   const state = {
     enabled: false,
     blocks: [],          // { id, userMsg, gptMsg, parentId, x, y, w, h, minimized, highlights }
+    notes: [],           // { id, x, y, html }
     connections: [],     // { fromId, toId }
     pendingParentId: null, // bloque marcado para bifurcación
     currentChatId: null,
@@ -50,9 +51,11 @@
   function saveState() {
     const data = {
       blocks: state.blocks,
+      notes: state.notes,
       connections: state.connections,
       idCounter: state.idCounter,
       canvasOffset: state.canvasOffset,
+      pendingParentId: state.pendingParentId,
     };
     chrome.storage.local.set({ [storageKey()]: data });
   }
@@ -62,9 +65,19 @@
       const data = res[storageKey()];
       if (data) {
         state.blocks = data.blocks || [];
+        state.notes = data.notes || [];
         state.connections = data.connections || [];
         state.idCounter = data.idCounter || 0;
         state.canvasOffset = data.canvasOffset || { x: 0, y: 0 };
+        state.pendingParentId = data.pendingParentId || null;
+      } else {
+        // Evitar arrastrar estado de otro chat cuando no hay guardado.
+        state.blocks = [];
+        state.notes = [];
+        state.connections = [];
+        state.idCounter = 0;
+        state.canvasOffset = { x: 0, y: 0 };
+        state.pendingParentId = null;
       }
       cb && cb(!!data);
     });
@@ -140,6 +153,8 @@
         id: uid(),
         userMsg: turn.userMsg,
         gptMsg: turn.gptMsg,
+        contentHtml: turn.gptMsg ? escapeHtml(turn.gptMsg) : '<span class="gpt-generating">Generando...</span>',
+        annotated: false,
         parentId: parentId,
         x: pos.x,
         y: pos.y,
@@ -172,7 +187,10 @@
       // Sólo forzar update cuando ya tenemos texto real del assistant.
       if (turn.gptMsg && turn.gptMsg !== block.gptMsg) {
         block.gptMsg = turn.gptMsg;
-        updateBlockContent(block.id, turn.gptMsg);
+        if (!block.annotated) {
+          block.contentHtml = escapeHtml(turn.gptMsg);
+        }
+        updateBlockContent(block.id, block.contentHtml || escapeHtml(turn.gptMsg));
         changed = true;
       }
     }
@@ -180,10 +198,10 @@
     if (changed) saveState();
   }
 
-  function updateBlockContent(blockId, content) {
+  function updateBlockContent(blockId, contentHtml) {
     const contentEl = document.querySelector(`#block-${blockId} .gpt-block-content`);
     if (!contentEl) return;
-    contentEl.textContent = content;
+    contentEl.innerHTML = contentHtml;
   }
 
   function calcNewBlockPosition(parentId) {
@@ -544,27 +562,59 @@
     const x = e.clientX - rect.left - state.canvasOffset.x;
     const y = e.clientY - rect.top  - state.canvasOffset.y;
 
+    const noteData = {
+      id: uid(),
+      x,
+      y,
+      html: '',
+    };
+    state.notes.push(noteData);
+    const noteEl = renderTextNote(noteData);
+    const editor = noteEl?.querySelector('.gpt-text-note-editor');
+    if (editor) editor.focus();
+    saveState();
+  }
+
+  function renderTextNote(noteData) {
+    if (!blocksLayer || !noteData) return null;
     const note = document.createElement('div');
     note.className = 'gpt-text-note';
-    note.style.left = x + 'px';
-    note.style.top  = y + 'px';
+    note.dataset.noteId = noteData.id;
+    note.style.left = noteData.x + 'px';
+    note.style.top  = noteData.y + 'px';
     note.innerHTML = `
       <button class="gpt-text-note-close" title="Eliminar nota" aria-label="Eliminar nota">✕</button>
-      <div class="gpt-text-note-editor" contenteditable="true"></div>
+      <div class="gpt-text-note-editor" contenteditable="true">${noteData.html || ''}</div>
     `;
 
     const editor = note.querySelector('.gpt-text-note-editor');
     const closeBtn = note.querySelector('.gpt-text-note-close');
-    editor.addEventListener('blur', saveState);
+    editor.addEventListener('mousedown', (ev) => ev.stopPropagation());
+    editor.addEventListener('click', (ev) => ev.stopPropagation());
+    editor.addEventListener('blur', () => {
+      const n = state.notes.find(item => item.id === noteData.id);
+      if (n) n.html = editor.innerHTML;
+      saveState();
+    });
     closeBtn.addEventListener('click', (ev) => {
       ev.preventDefault();
       ev.stopPropagation();
+      state.notes = state.notes.filter(n => n.id !== noteData.id);
       note.remove();
       saveState();
     });
-    makeDraggable(note, null);
+    makeDraggable(
+      note,
+      () => {
+        const n = state.notes.find(item => item.id === noteData.id);
+        if (!n) return;
+        n.x = parseInt(note.style.left, 10) || 0;
+        n.y = parseInt(note.style.top, 10) || 0;
+      },
+      saveState
+    );
     blocksLayer.appendChild(note);
-    editor.focus();
+    return note;
   }
 
   // ─── Bloques ──────────────────────────────────────────────────────────────
@@ -572,7 +622,9 @@
     if (!blocksLayer) return;
     blocksLayer.innerHTML = '';
     state.blocks.forEach(renderBlock);
+    state.notes.forEach(renderTextNote);
     renderConnections();
+    applyPendingForkUI();
   }
 
   function renderBlock(block) {
@@ -595,7 +647,7 @@
         </div>
       </div>
       <div class="gpt-block-body">
-        <div class="gpt-block-content">${block.gptMsg || '<span class="gpt-generating">Generando...</span>'}</div>
+        <div class="gpt-block-content">${block.contentHtml || (block.gptMsg ? escapeHtml(block.gptMsg) : '<span class="gpt-generating">Generando...</span>')}</div>
       </div>
       <div class="gpt-block-resize-handle"></div>
     `;
@@ -615,7 +667,8 @@
     });
 
     // Resaltado / subrayado al seleccionar texto
-    el.querySelector('.gpt-block-content').addEventListener('mouseup', () => {
+    const blockContentEl = el.querySelector('.gpt-block-content');
+    blockContentEl.addEventListener('mouseup', () => {
       if (!state.markMode) return;
       const sel = window.getSelection();
       if (!sel || sel.isCollapsed) return;
@@ -624,6 +677,8 @@
       span.className = state.markMode === 'highlight' ? 'gpt-highlight' : 'gpt-underline';
       range.surroundContents(span);
       sel.removeAllRanges();
+      block.contentHtml = blockContentEl.innerHTML;
+      block.annotated = true;
       saveState();
     });
 
@@ -679,6 +734,7 @@
 
     // Indicador visual en la barra de input
     showForkIndicator(block.userMsg);
+    saveState();
   }
 
   function showForkIndicator(title) {
@@ -698,6 +754,16 @@
     document.querySelectorAll('.gpt-block.fork-pending').forEach(b => b.classList.remove('fork-pending'));
     const ind = document.getElementById('gpt-fork-indicator');
     if (ind) ind.classList.remove('visible');
+    saveState();
+  }
+
+  function applyPendingForkUI() {
+    if (!state.pendingParentId) return;
+    const block = state.blocks.find((b) => b.id === state.pendingParentId);
+    const blockEl = document.getElementById('block-' + state.pendingParentId);
+    if (!block || !blockEl) return;
+    blockEl.classList.add('fork-pending');
+    showForkIndicator(block.userMsg || 'mensaje');
   }
 
   // ─── Conexiones SVG ───────────────────────────────────────────────────────
@@ -741,13 +807,20 @@
   // ─── Importar conversación existente ─────────────────────────────────────
   function importExistingConversation() {
     const turns = getConversationTurns();
-    if (turns.length === 0) return;
 
     // Reset
     state.blocks = [];
+    state.notes = [];
     state.connections = [];
     state.idCounter = 0;
+    state.pendingParentId = null;
     lastKnownTurnCount = 0;
+
+    if (turns.length === 0) {
+      renderAllBlocks();
+      saveState();
+      return;
+    }
 
     // Construir árbol lineal (no tenemos info de bifurcaciones pasadas)
     let prevId = null;
@@ -757,6 +830,8 @@
         id: uid(),
         userMsg: turn.userMsg,
         gptMsg: turn.gptMsg,
+        contentHtml: turn.gptMsg ? escapeHtml(turn.gptMsg) : '<span class="gpt-generating">Generando...</span>',
+        annotated: false,
         parentId: prevId,
         x: pos.x,
         y: pos.y,
@@ -858,11 +933,12 @@
       .replace(/"/g, '&quot;');
   }
 
-  function makeDraggable(el, onMove) {
+  function makeDraggable(el, onMove, onEnd) {
     let dragging = false, sx, sy, ox, oy;
     el.addEventListener('mousedown', (e) => {
       // En notas de texto: permitir escribir/seleccionar texto y pulsar cerrar.
-      if (e.target.closest('.gpt-text-note-editor') || e.target.closest('.gpt-text-note-close')) {
+      const targetEl = e.target instanceof Element ? e.target : null;
+      if (targetEl && (targetEl.closest('.gpt-text-note-editor') || targetEl.closest('.gpt-text-note-close'))) {
         return;
       }
       dragging = true;
@@ -877,7 +953,11 @@
       el.style.top  = (oy + e.clientY - sy) + 'px';
       onMove && onMove();
     });
-    window.addEventListener('mouseup', () => { dragging = false; });
+    window.addEventListener('mouseup', () => {
+      if (!dragging) return;
+      dragging = false;
+      onEnd && onEnd();
+    });
   }
 
 })();
