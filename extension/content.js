@@ -1,7 +1,7 @@
 /**
  * ChatGPT Canvas — content.js
  * Núcleo principal de la extensión.
- * Reemplaza la zona central de ChatGPT con un canvas visual de bloques interconectados.
+ * Inserta un canvas visual sobre la conversación, manteniendo visible la barra de escritura nativa.
  */
 
 (function () {
@@ -228,7 +228,12 @@
     const container = findChatContainer();
     if (container) {
       hideNativeChildren(container, true);
-      container.insertBefore(canvasRoot, container.firstChild);
+      const composerHost = findComposerHost(container);
+      if (composerHost) {
+        container.insertBefore(canvasRoot, composerHost);
+      } else {
+        container.insertBefore(canvasRoot, container.firstChild);
+      }
       console.log('[Canvas] Insertado dentro del container de ChatGPT');
     } else {
       console.warn('[Canvas] Fallback: insertando en body');
@@ -246,14 +251,44 @@
     bindToolbarEvents();
     bindViewportEvents();
     applyCanvasOffset();
+    toggleNativeJumpToBottom(true);
     window.addEventListener('resize', resizeDrawCanvas);
     console.log('[Canvas] Canvas listo ✓');
   }
 
+  function findComposerHost(container) {
+    if (!container) return null;
+    return Array.from(container.children).find((child) => {
+      if (child.id === 'gpt-canvas-root') return false;
+      return child.matches('form') || !!child.querySelector('form textarea, form [contenteditable="true"]');
+    }) || null;
+  }
+
+  function isConversationChild(child) {
+    if (!child) return false;
+    if (child.matches('[data-testid="conversation-turns"]')) return true;
+    if ((child.getAttribute('data-testid') || '').startsWith('conversation')) return true;
+    if (child.querySelector('[data-testid="conversation-turns"]')) return true;
+    if (child.querySelector('article[data-testid^="conversation-turn"]')) return true;
+    if (child.querySelector('[data-message-author-role="assistant"], [data-message-author-role="user"]')) return true;
+    return false;
+  }
+
+  function shouldHideChild(child, composerHost) {
+    if (!child || child.id === 'gpt-canvas-root') return false;
+    if (composerHost && child === composerHost) return false;
+    // Nunca ocultar la zona del composer/input nativo de ChatGPT.
+    if (child.matches('form')) return false;
+    if (child.querySelector('form textarea, form [contenteditable="true"]')) return false;
+    // Solo ocultar capas de conversación, no toda la página.
+    return isConversationChild(child);
+  }
+
   function hideNativeChildren(container, hide) {
     if (!container) return;
+    const composerHost = findComposerHost(container);
     Array.from(container.children).forEach(child => {
-      if (child.id === 'gpt-canvas-root') return;
+      if (!shouldHideChild(child, composerHost)) return;
       if (hide) {
         child.dataset.gptHidden = '1';
         child.dataset.gptOrigDisplay = child.style.display || '';
@@ -276,9 +311,27 @@
     }
     const ind = document.getElementById('gpt-fork-indicator');
     if (ind) ind.remove();
+    toggleNativeJumpToBottom(false);
     canvasRoot = svgLayer = blocksLayer = toolbarEl = drawCanvas = drawCtx = null;
     window.removeEventListener('resize', resizeDrawCanvas);
     console.log('[Canvas] Canvas eliminado');
+  }
+
+  function toggleNativeJumpToBottom(hide) {
+    const selectors = [
+      'button[aria-label*="bottom" i]',
+      'button[data-testid*="jump" i]',
+      'button[data-testid*="scroll-to-bottom" i]',
+    ];
+    document.querySelectorAll(selectors.join(',')).forEach((btn) => {
+      if (hide) {
+        btn.dataset.gptOrigDisplay = btn.style.display || '';
+        btn.style.setProperty('display', 'none', 'important');
+      } else if (btn.dataset.gptOrigDisplay !== undefined) {
+        btn.style.display = btn.dataset.gptOrigDisplay;
+        delete btn.dataset.gptOrigDisplay;
+      }
+    });
   }
 
   // ─── Toolbar ──────────────────────────────────────────────────────────────
@@ -348,15 +401,33 @@
       if (state.annotationMode === 'draw') {
         startDrawing(e); return;
       }
-      if (state.annotationMode === 'text' && e.target === vp) {
-        spawnTextNote(e); return;
+      if (state.annotationMode === 'text') {
+        const clickedCanvasBg =
+          e.target === vp ||
+          e.target === svgLayer ||
+          e.target === drawCanvas ||
+          e.target === blocksLayer;
+        if (clickedCanvasBg) {
+          spawnTextNote(e);
+          return;
+        }
       }
-      if (e.target === vp || e.target === svgLayer || e.target === drawCanvas) {
+      if (e.target === vp || e.target === svgLayer || e.target === drawCanvas || e.target === blocksLayer) {
         // Pan
         state.panState = { startX: e.clientX, startY: e.clientY, ox: state.canvasOffset.x, oy: state.canvasOffset.y };
         vp.style.cursor = 'grabbing';
       }
     });
+
+    vp.addEventListener('wheel', (e) => {
+      if (!state.enabled) return;
+      // Desplazamiento libre con rueda/trackpad dentro del canvas.
+      state.canvasOffset.x -= e.deltaX;
+      state.canvasOffset.y -= e.deltaY;
+      applyCanvasOffset();
+      saveState();
+      e.preventDefault();
+    }, { passive: false });
 
     window.addEventListener('mousemove', (e) => {
       if (state.drawing) { continueDrawing(e); return; }
@@ -445,12 +516,23 @@
     note.className = 'gpt-text-note';
     note.style.left = x + 'px';
     note.style.top  = y + 'px';
-    note.contentEditable = 'true';
-    note.textContent = '';
-    note.addEventListener('blur', saveState);
+    note.innerHTML = `
+      <button class="gpt-text-note-close" title="Eliminar nota" aria-label="Eliminar nota">✕</button>
+      <div class="gpt-text-note-editor" contenteditable="true"></div>
+    `;
+
+    const editor = note.querySelector('.gpt-text-note-editor');
+    const closeBtn = note.querySelector('.gpt-text-note-close');
+    editor.addEventListener('blur', saveState);
+    closeBtn.addEventListener('click', (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      note.remove();
+      saveState();
+    });
     makeDraggable(note, null);
     blocksLayer.appendChild(note);
-    note.focus();
+    editor.focus();
   }
 
   // ─── Bloques ──────────────────────────────────────────────────────────────
