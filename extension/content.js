@@ -251,6 +251,7 @@
     bindToolbarEvents();
     bindViewportEvents();
     applyCanvasOffset();
+    toggleNativeJumpToBottom(true);
     window.addEventListener('resize', resizeDrawCanvas);
     console.log('[Canvas] Canvas listo ✓');
   }
@@ -310,9 +311,27 @@
     }
     const ind = document.getElementById('gpt-fork-indicator');
     if (ind) ind.remove();
+    toggleNativeJumpToBottom(false);
     canvasRoot = svgLayer = blocksLayer = toolbarEl = drawCanvas = drawCtx = null;
     window.removeEventListener('resize', resizeDrawCanvas);
     console.log('[Canvas] Canvas eliminado');
+  }
+
+  function toggleNativeJumpToBottom(hide) {
+    const selectors = [
+      'button[aria-label*="bottom" i]',
+      'button[data-testid*="jump" i]',
+      'button[data-testid*="scroll-to-bottom" i]',
+    ];
+    document.querySelectorAll(selectors.join(',')).forEach((btn) => {
+      if (hide) {
+        btn.dataset.gptOrigDisplay = btn.style.display || '';
+        btn.style.setProperty('display', 'none', 'important');
+      } else if (btn.dataset.gptOrigDisplay !== undefined) {
+        btn.style.display = btn.dataset.gptOrigDisplay;
+        delete btn.dataset.gptOrigDisplay;
+      }
+    });
   }
 
   // ─── Toolbar ──────────────────────────────────────────────────────────────
@@ -393,12 +412,22 @@
           return;
         }
       }
-      if (e.target === vp || e.target === svgLayer || e.target === drawCanvas) {
+      if (e.target === vp || e.target === svgLayer || e.target === drawCanvas || e.target === blocksLayer) {
         // Pan
         state.panState = { startX: e.clientX, startY: e.clientY, ox: state.canvasOffset.x, oy: state.canvasOffset.y };
         vp.style.cursor = 'grabbing';
       }
     });
+
+    vp.addEventListener('wheel', (e) => {
+      if (!state.enabled) return;
+      // Desplazamiento libre con rueda/trackpad dentro del canvas.
+      state.canvasOffset.x -= e.deltaX;
+      state.canvasOffset.y -= e.deltaY;
+      applyCanvasOffset();
+      saveState();
+      e.preventDefault();
+    }, { passive: false });
 
     window.addEventListener('mousemove', (e) => {
       if (state.drawing) { continueDrawing(e); return; }
@@ -487,12 +516,23 @@
     note.className = 'gpt-text-note';
     note.style.left = x + 'px';
     note.style.top  = y + 'px';
-    note.contentEditable = 'true';
-    note.textContent = '';
-    note.addEventListener('blur', saveState);
+    note.innerHTML = `
+      <button class="gpt-text-note-close" title="Eliminar nota" aria-label="Eliminar nota">✕</button>
+      <div class="gpt-text-note-editor" contenteditable="true"></div>
+    `;
+
+    const editor = note.querySelector('.gpt-text-note-editor');
+    const closeBtn = note.querySelector('.gpt-text-note-close');
+    editor.addEventListener('blur', saveState);
+    closeBtn.addEventListener('click', (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      note.remove();
+      saveState();
+    });
     makeDraggable(note, null);
     blocksLayer.appendChild(note);
-    note.focus();
+    editor.focus();
   }
 
   // ─── Bloques ──────────────────────────────────────────────────────────────
