@@ -1,7 +1,7 @@
 /**
  * ChatGPT Canvas — content.js
  * Núcleo principal de la extensión.
- * Reemplaza la zona central de ChatGPT con un canvas visual de bloques interconectados.
+ * Inserta un canvas visual sobre la conversación, manteniendo visible la barra de escritura nativa.
  */
 
 (function () {
@@ -228,7 +228,12 @@
     const container = findChatContainer();
     if (container) {
       hideNativeChildren(container, true);
-      container.insertBefore(canvasRoot, container.firstChild);
+      const composerHost = findComposerHost(container);
+      if (composerHost) {
+        container.insertBefore(canvasRoot, composerHost);
+      } else {
+        container.insertBefore(canvasRoot, container.firstChild);
+      }
       console.log('[Canvas] Insertado dentro del container de ChatGPT');
     } else {
       console.warn('[Canvas] Fallback: insertando en body');
@@ -250,10 +255,39 @@
     console.log('[Canvas] Canvas listo ✓');
   }
 
+  function findComposerHost(container) {
+    if (!container) return null;
+    return Array.from(container.children).find((child) => {
+      if (child.id === 'gpt-canvas-root') return false;
+      return child.matches('form') || !!child.querySelector('form textarea, form [contenteditable="true"]');
+    }) || null;
+  }
+
+  function isConversationChild(child) {
+    if (!child) return false;
+    if (child.matches('[data-testid="conversation-turns"]')) return true;
+    if ((child.getAttribute('data-testid') || '').startsWith('conversation')) return true;
+    if (child.querySelector('[data-testid="conversation-turns"]')) return true;
+    if (child.querySelector('article[data-testid^="conversation-turn"]')) return true;
+    if (child.querySelector('[data-message-author-role="assistant"], [data-message-author-role="user"]')) return true;
+    return false;
+  }
+
+  function shouldHideChild(child, composerHost) {
+    if (!child || child.id === 'gpt-canvas-root') return false;
+    if (composerHost && child === composerHost) return false;
+    // Nunca ocultar la zona del composer/input nativo de ChatGPT.
+    if (child.matches('form')) return false;
+    if (child.querySelector('form textarea, form [contenteditable="true"]')) return false;
+    // Solo ocultar capas de conversación, no toda la página.
+    return isConversationChild(child);
+  }
+
   function hideNativeChildren(container, hide) {
     if (!container) return;
+    const composerHost = findComposerHost(container);
     Array.from(container.children).forEach(child => {
-      if (child.id === 'gpt-canvas-root') return;
+      if (!shouldHideChild(child, composerHost)) return;
       if (hide) {
         child.dataset.gptHidden = '1';
         child.dataset.gptOrigDisplay = child.style.display || '';
@@ -348,8 +382,16 @@
       if (state.annotationMode === 'draw') {
         startDrawing(e); return;
       }
-      if (state.annotationMode === 'text' && e.target === vp) {
-        spawnTextNote(e); return;
+      if (state.annotationMode === 'text') {
+        const clickedCanvasBg =
+          e.target === vp ||
+          e.target === svgLayer ||
+          e.target === drawCanvas ||
+          e.target === blocksLayer;
+        if (clickedCanvasBg) {
+          spawnTextNote(e);
+          return;
+        }
       }
       if (e.target === vp || e.target === svgLayer || e.target === drawCanvas) {
         // Pan
