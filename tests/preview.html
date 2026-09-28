@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Canvas: prueba local con mensajes simulados</title>
+  <link rel="stylesheet" href="../extension/styles.css">
+  <style>
+    body { margin: 0; font: 14px system-ui, sans-serif; background: #161618; color: #eee; }
+    nav { position: fixed; width: 220px; top: 0; bottom: 0; background: #202024; padding: 20px; box-sizing: border-box; }
+    nav p { color: #aaa; line-height: 1.6; }
+    main { margin-left: 220px; height: calc(100vh - 50px); margin-top: 50px; }
+    header { position: fixed; top: 0; left: 220px; right: 0; height: 50px; padding: 14px 20px; box-sizing: border-box; }
+    #thread { padding: 20px; }
+    form { position: fixed; bottom: 25px; left: calc(220px + 5%); right: 5%; }
+    #prompt-textarea { padding: 18px; border-radius: 18px; border: 1px solid #484850; background: #26262a; outline: none; }
+    .fixture-button { padding: 10px; background: #363640; border: 1px solid #666; border-radius: 5px; color: white; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <nav>
+    <strong>Prueba local de Canvas</strong>
+    <p>Mensajes ficticios para comprobar formato, streaming y anotaciones. No se conecta a ChatGPT.</p>
+    <button class="fixture-button" id="fixture-stream">Simular respuesta nueva</button>
+    <p id="fixture-status" role="status">Lista para probar</p>
+  </nav>
+  <header>Conversación simulada</header>
+  <main>
+    <div id="thread">
+      <article data-testid="conversation-turn-1">
+        <section data-turn="user" data-turn-id="u1"><div class="whitespace-pre-wrap">¿Cómo se muestran las respuestas?</div></section>
+        <section data-turn="assistant"><div class="markdown">
+          <h2>Contenido con formato</h2>
+          <p>Una respuesta con <strong>negrita</strong>, <em>cursiva</em> y una lista:</p>
+          <ul><li>Detección por rol.</li><li>Actualización mientras llega el texto.</li><li>Notas y posiciones conservadas.</li></ul>
+          <p>Este bloque tiene scroll independiente del canvas.</p>
+          <blockquote>Selecciona varias palabras para probar el resaltador.</blockquote>
+          <p>Última línea de la respuesta.</p>
+        </div><button>Copiar respuesta (no debe aparecer)</button></section>
+      </article>
+      <section data-turn="user" data-turn-id="u2"><div class="whitespace-pre-wrap">Enséñame una tabla y código</div></section>
+      <section data-turn="assistant"><div class="prose">
+        <table><thead><tr><th>Elemento</th><th>Resultado</th></tr></thead><tbody><tr><td>Tabla</td><td>Conservada</td></tr><tr><td>Código</td><td>Con saltos de línea</td></tr></tbody></table>
+        <pre><div>JavaScript <button>Copy code</button></div><code>const canvas = {
+  ready: true,
+  messages: 2
+};</code></pre>
+      </div></section>
+    </div>
+    <form data-type="unified-composer"><div id="prompt-textarea" contenteditable="true" role="textbox" aria-label="Editor de prueba">El editor permanece visible</div></form>
+  </main>
+  <script>
+    const fixtureStorage = { canvasEnabled: true };
+    window.chrome = {
+      storage: { local: {
+        get(keys, cb) { setTimeout(() => cb(structuredClone(fixtureStorage)), 0); },
+        set(data) { Object.assign(fixtureStorage, structuredClone(data)); }
+      } },
+      runtime: { onMessage: { addListener() {} } }
+    };
+    document.getElementById('fixture-stream').addEventListener('click', () => {
+      const thread = document.getElementById('thread');
+      const n = thread.querySelectorAll('[data-turn="user"]').length + 1;
+      thread.insertAdjacentHTML('beforeend', `<section data-turn="user" data-turn-id="u${n}"><div class="whitespace-pre-wrap">Prueba de streaming ${n}</div></section><section data-turn="assistant"><div class="markdown"><p id="stream-${n}">Respuesta</p></div></section>`);
+      setTimeout(() => {
+        document.getElementById(`stream-${n}`).firstChild.data = 'Respuesta completada mediante actualización de un nodo de texto.';
+        document.getElementById('fixture-status').textContent = 'Respuesta simulada completada';
+      }, 350);
+    });
+    document.querySelector('form').addEventListener('submit', event => event.preventDefault());
+  </script>
+  <script src="../extension/conversation.js"></script>
+  <script src="../extension/content.js"></script>
+</body>
+</html>

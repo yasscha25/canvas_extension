@@ -38,6 +38,8 @@
   // ─── Elementos DOM principales ────────────────────────────────────────────
   let canvasRoot, svgLayer, blocksLayer, toolbarEl, drawCanvas, drawCtx;
   let resizeHandler = null;
+  let restoreGeneration = 0;
+  let restoreTimer = null;
 
   // ─── Utilidades ───────────────────────────────────────────────────────────
   function uid() { return 'b' + (++state.idCounter) + '_' + Date.now(); }
@@ -53,6 +55,7 @@
 
   // ─── Persistencia ─────────────────────────────────────────────────────────
   function saveState() {
+    if (!state.currentChatId || state.rehydrating) return;
     const data = {
       blocks: state.blocks,
       notes: state.notes,
@@ -64,9 +67,11 @@
     chrome.storage.local.set({ [storageKey()]: data });
   }
 
-  function loadState(cb) {
-    chrome.storage.local.get([storageKey()], (res) => {
-      const data = res[storageKey()];
+  function loadState(cb, generation) {
+    const key = storageKey();
+    chrome.storage.local.get([key], (res) => {
+      if (!state.enabled || generation !== restoreGeneration || key !== storageKey()) return;
+      const data = res[key];
       if (data) {
         state.blocks = data.blocks || [];
         state.notes = data.notes || [];
@@ -88,77 +93,108 @@
   }
 
   // ─── Observador de mensajes ChatGPT ───────────────────────────────────────
-  let lastKnownTurnCount = 0;
   let messageObserver = null;
+  let syncTimer = null;
+
+  function stopMessageObserver() {
+    if (messageObserver) messageObserver.disconnect();
+    clearTimeout(syncTimer);
+    syncTimer = null;
+  }
+
+  function scheduleMessageSync() {
+    if (!state.enabled || state.rehydrating || syncTimer !== null) return;
+    syncTimer = setTimeout(() => {
+      syncTimer = null;
+      if (state.enabled && !state.rehydrating) syncMessagesToBlocks();
+    }, 120);
+  }
 
   function startMessageObserver() {
-    if (messageObserver) messageObserver.disconnect();
-
-    messageObserver = new MutationObserver(() => {
-      if (!state.enabled) return;
-      syncMessagesToBlocks();
+    stopMessageObserver();
+    messageObserver = new MutationObserver((records) => {
+      // Do not observe our own rendering/annotations as new ChatGPT output.
+      const hasNativeChange = records.some(({ target }) => {
+        const el = target.nodeType === Node.ELEMENT_NODE ? target : target.parentElement;
+        return el && !el.closest('#gpt-canvas-root, #gpt-fork-indicator');
+      });
+      if (hasNativeChange) scheduleMessageSync();
     });
-
-    const target = document.body;
-    messageObserver.observe(target, { childList: true, subtree: true });
+    messageObserver.observe(document.body, {
+      childList: true,
+      characterData: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ['data-message-author-role', 'data-message-id', 'data-turn', 'data-turn-id', 'data-testid', 'data-message-content', 'hidden', 'aria-hidden'],
+    });
   }
 
   function getConversationTurns() {
-    // Selector robusto que funciona tanto en chatgpt.com como en chat.openai.com
-    const turns = [];
-
-    // Intentar múltiples selectores para máxima compatibilidad
-    const articleEls = document.querySelectorAll('article[data-testid^="conversation-turn"]');
-
-    if (articleEls.length > 0) {
-      // Agrupar de 2 en 2: user + assistant
-      for (let i = 0; i + 1 < articleEls.length; i += 2) {
-        const userEl = articleEls[i];
-        const assistantEl = articleEls[i + 1];
-        const userText = userEl ? (userEl.querySelector('.whitespace-pre-wrap') || userEl).innerText.trim() : '';
-        const gptText = assistantEl ? assistantEl.innerText.trim() : '';
-        if (userText) turns.push({ userMsg: userText, gptMsg: gptText });
-      }
-    } else {
-      // Fallback: buscar por roles
-      const userMsgs = document.querySelectorAll('[data-message-author-role="user"]');
-      const asstMsgs = document.querySelectorAll('[data-message-author-role="assistant"]');
-      const maxLen = Math.max(userMsgs.length, asstMsgs.length);
-      for (let i = 0; i < maxLen; i++) {
-        const userText = userMsgs[i] ? userMsgs[i].innerText.trim() : '';
-        const gptText = asstMsgs[i] ? asstMsgs[i].innerText.trim() : '';
-        if (userText) turns.push({ userMsg: userText, gptMsg: gptText });
-      }
-    }
-
-    return turns;
+    return ChatGPTCanvasConversation.getTurns(document);
   }
 
   function syncMessagesToBlocks() {
-    if (state.rehydrating) return;
+    if (!state.enabled || state.rehydrating) return;
+    // React may replace the native container without a URL change.
+    if (!canvasRoot?.isConnected) {
+      injectCanvas();
+      renderAllBlocks();
+    }
+    if (!blocksLayer) return;
     const turns = getConversationTurns();
-    if (turns.length === 0) return;
+    const claimed = new Set();
+    let changed = false;
+    let added = false;
+    for (const turn of turns) {
+      let block = turn.sourceId && state.blocks.find(b => b.sourceId === turn.sourceId && !claimed.has(b.id));
+      if (!block) {
+        // Migrate existing 1.0.1 canvases without touching positions or notes.
+        // Do not align by array index: ChatGPT can mount only part of a chat.
+        const normalize = text => String(text || '').replace(/\s+/g, ' ').trim();
+        block = state.blocks.find(b => !claimed.has(b.id) && (!b.sourceId || !turn.sourceId) && normalize(b.userMsg) === normalize(turn.userMsg));
+      }
+      if (block) {
+        claimed.add(block.id);
+        if (turn.sourceId && block.sourceId !== turn.sourceId) {
+          block.sourceId = turn.sourceId;
+          changed = true;
+        }
+        if (block.userMsg !== turn.userMsg) {
+          block.userMsg = turn.userMsg;
+          const title = document.getElementById('block-' + block.id)?.querySelector('.gpt-block-title');
+          if (title) title.textContent = turn.userMsg;
+          changed = true;
+        }
+        // An empty transient DOM must not erase a previously captured answer.
+        if (turn.gptMsg) {
+          if (block.gptMsg !== turn.gptMsg) {
+            block.gptMsg = turn.gptMsg;
+            changed = true;
+          }
+          if (!block.annotated && (block.contentHtml !== turn.gptHtml || block.contentFormat !== 'rich')) {
+            block.contentHtml = turn.gptHtml;
+            block.contentFormat = 'rich';
+            updateBlockContent(block.id, block.contentHtml, true);
+            changed = true;
+          }
+        }
+        continue;
+      }
 
-    // Actualizar bloques existentes cuando una respuesta pasa de "Generando..."
-    // a texto final sin crear un turno nuevo.
-    updateExistingBlocksFromTurns(turns);
-
-    if (turns.length === lastKnownTurnCount) return;
-
-    const newTurns = turns.slice(lastKnownTurnCount);
-    lastKnownTurnCount = turns.length;
-
-    newTurns.forEach((turn, i) => {
-      // Calcular posición
       const parentId = state.pendingParentId || (state.blocks.length > 0 ? state.blocks[state.blocks.length - 1].id : null);
-      state.pendingParentId = null; // consumir
-
+      if (state.pendingParentId) {
+        state.pendingParentId = null;
+        document.querySelectorAll('.gpt-block.fork-pending').forEach(el => el.classList.remove('fork-pending'));
+        document.getElementById('gpt-fork-indicator')?.classList.remove('visible');
+      }
       const pos = calcNewBlockPosition(parentId);
-      const block = {
+      block = {
         id: uid(),
+        sourceId: turn.sourceId,
         userMsg: turn.userMsg,
         gptMsg: turn.gptMsg,
-        contentHtml: turn.gptMsg ? escapeHtml(turn.gptMsg) : '<span class="gpt-generating">Generando...</span>',
+        contentHtml: turn.gptHtml || '<span class="gpt-generating">Generando...</span>',
+        contentFormat: 'rich',
         annotated: false,
         parentId: parentId,
         x: pos.x,
@@ -170,43 +206,28 @@
       };
 
       state.blocks.push(block);
+      claimed.add(block.id);
       if (parentId) {
         state.connections.push({ fromId: parentId, toId: block.id });
       }
 
       renderBlock(block);
-      renderConnections();
-      saveState();
-    });
-  }
-
-  function updateExistingBlocksFromTurns(turns) {
-    const max = Math.min(turns.length, state.blocks.length);
-    let changed = false;
-
-    for (let i = 0; i < max; i++) {
-      const turn = turns[i];
-      const block = state.blocks[i];
-      if (!turn || !block) continue;
-
-      // Sólo forzar update cuando ya tenemos texto real del assistant.
-      if (turn.gptMsg && turn.gptMsg !== block.gptMsg) {
-        block.gptMsg = turn.gptMsg;
-        if (!block.annotated) {
-          block.contentHtml = escapeHtml(turn.gptMsg);
-        }
-        updateBlockContent(block.id, block.contentHtml || escapeHtml(turn.gptMsg));
-        changed = true;
-      }
+      added = changed = true;
     }
-
+    if (added) renderConnections();
+    const empty = document.getElementById('gpt-canvas-empty');
+    if (empty) empty.hidden = state.blocks.length > 0;
+    positionCanvasRoot();
     if (changed) saveState();
   }
 
-  function updateBlockContent(blockId, contentHtml) {
-    const contentEl = document.querySelector(`#block-${blockId} .gpt-block-content`);
+  function updateBlockContent(blockId, contentHtml, rich) {
+    const contentEl = document.getElementById('block-' + blockId)?.querySelector('.gpt-block-content');
     if (!contentEl) return;
+    const scrollTop = contentEl.scrollTop;
     contentEl.innerHTML = contentHtml;
+    contentEl.classList.toggle('gpt-rich-content', !!rich);
+    contentEl.scrollTop = scrollTop;
   }
 
   function calcNewBlockPosition(parentId) {
@@ -272,11 +293,13 @@
           <button id="tool-zoom-in" class="gpt-tool" title="Zoom +">+</button>
           <button id="tool-zoom-out" class="gpt-tool" title="Zoom −">−</button>
           <button id="tool-fit" class="gpt-tool" title="Ajustar vista">⊡</button>
+          <button id="tool-sync" class="gpt-tool" title="Volver a detectar mensajes" aria-label="Volver a detectar mensajes">↻</button>
           <div class="gpt-tool-sep"></div>
           <button id="tool-close" class="gpt-tool gpt-tool-close" title="Cerrar canvas">✕</button>
         </div>
       </div>
       <div id="gpt-canvas-viewport">
+        <p id="gpt-canvas-empty" role="status">Todavía no se han detectado mensajes. Abre una conversación o pulsa ↻ para volver a intentarlo.</p>
         <canvas id="gpt-draw-canvas"></canvas>
         <svg id="gpt-svg-layer" xmlns="http://www.w3.org/2000/svg"></svg>
         <div id="gpt-blocks-layer"></div>
@@ -311,6 +334,7 @@
     bindViewportEvents();
     applyCanvasOffset();
     toggleNativeJumpToBottom(true);
+    if (resizeHandler) window.removeEventListener('resize', resizeHandler);
     resizeHandler = () => {
       positionCanvasRoot();
       resizeDrawCanvas();
@@ -322,21 +346,18 @@
   function positionCanvasRoot() {
     if (!canvasRoot) return;
     const main = document.querySelector('main');
-    const nav = document.querySelector('nav');
-    const composer = document.querySelector('form');
+    const composer = document.querySelector('#prompt-textarea')?.closest('form') || document.querySelector('form[data-type="unified-composer"]') || document.querySelector('main form');
     const mainRect = main?.getBoundingClientRect();
-    const navRect = nav?.getBoundingClientRect();
 
-    // main en ChatGPT puede ser una columna centrada; para evitar descuadres
-    // usamos el borde derecho del sidebar como ancla izquierda.
-    const left = navRect ? Math.max(0, navRect.right) : (mainRect ? Math.max(0, mainRect.left) : 260);
-    const right = 0;
+    // Use the conversation region, not the first nav (which may be a hidden rail).
+    const left = mainRect ? Math.max(0, mainRect.left) : 0;
+    const right = mainRect ? Math.max(0, window.innerWidth - mainRect.right) : 0;
     const top = mainRect ? mainRect.top : 0;
     let bottom = 16;
 
     if (composer) {
       const cRect = composer.getBoundingClientRect();
-      bottom = Math.max(12, window.innerHeight - cRect.top + 8);
+      if (cRect.height > 0) bottom = Math.max(12, window.innerHeight - cRect.top + 8);
     }
 
     canvasRoot.style.position = 'fixed';
@@ -382,13 +403,18 @@
     Array.from(container.children).forEach(child => {
       if (!shouldHideChild(child, composerHost)) return;
       if (hide) {
+        if (child.dataset.gptHidden) return;
         child.dataset.gptHidden = '1';
-        child.dataset.gptOrigDisplay = child.style.display || '';
-        child.style.setProperty('display', 'none', 'important');
+        child.dataset.gptOrigVisibility = child.style.getPropertyValue('visibility');
+        child.dataset.gptOrigVisibilityPriority = child.style.getPropertyPriority('visibility');
+        // Retain layout so native lazy loading does not lose the message list.
+        child.style.setProperty('visibility', 'hidden', 'important');
       } else {
         if (child.dataset.gptHidden) {
-          child.style.display = child.dataset.gptOrigDisplay || '';
+          child.style.setProperty('visibility', child.dataset.gptOrigVisibility || '', child.dataset.gptOrigVisibilityPriority || '');
           delete child.dataset.gptHidden;
+          delete child.dataset.gptOrigVisibility;
+          delete child.dataset.gptOrigVisibilityPriority;
         }
       }
     });
@@ -450,6 +476,7 @@
       drawCanvas.style.transform = `scale(${scale})`;
     });
     document.getElementById('tool-fit').addEventListener('click', fitView);
+    document.getElementById('tool-sync').addEventListener('click', syncMessagesToBlocks);
     document.getElementById('tool-close').addEventListener('click', disableCanvas);
   }
 
@@ -514,6 +541,8 @@
 
     vp.addEventListener('wheel', (e) => {
       if (!state.enabled) return;
+      // Let long answers and code/table overflow scroll inside their block.
+      if (e.target instanceof Element && e.target.closest('.gpt-block-content, .gpt-text-note-editor')) return;
       // Desplazamiento libre con rueda/trackpad dentro del canvas.
       state.canvasOffset.x -= e.deltaX;
       state.canvasOffset.y -= e.deltaY;
@@ -684,6 +713,7 @@
     el.style.left   = block.x + 'px';
     el.style.top    = block.y + 'px';
     el.style.width  = block.w + 'px';
+    el.style.height = block.h + 'px';
     if (block.minimized) el.classList.add('minimized');
 
     el.innerHTML = `
@@ -695,7 +725,7 @@
         </div>
       </div>
       <div class="gpt-block-body">
-        <div class="gpt-block-content">${block.contentHtml || (block.gptMsg ? escapeHtml(block.gptMsg) : '<span class="gpt-generating">Generando...</span>')}</div>
+        <div class="gpt-block-content${block.contentFormat === 'rich' ? ' gpt-rich-content' : ''}">${block.contentHtml || (block.gptMsg ? escapeHtml(block.gptMsg) : '<span class="gpt-generating">Generando...</span>')}</div>
       </div>
       <div class="gpt-block-resize-handle"></div>
     `;
@@ -721,9 +751,27 @@
       const sel = window.getSelection();
       if (!sel || sel.isCollapsed) return;
       const range = sel.getRangeAt(0);
-      const span  = document.createElement('span');
-      span.className = state.markMode === 'highlight' ? 'gpt-highlight' : 'gpt-underline';
-      range.surroundContents(span);
+      if (!blockContentEl.contains(range.startContainer) || !blockContentEl.contains(range.endContainer)) return;
+      // Wrap text ranges separately so a selection across <strong>, lists or
+      // paragraphs cannot throw InvalidStateError or destroy rich structure.
+      const walker = document.createTreeWalker(blockContentEl, NodeFilter.SHOW_TEXT);
+      const pieces = [];
+      while (walker.nextNode()) {
+        const node = walker.currentNode;
+        if (!range.intersectsNode(node)) continue;
+        const start = node === range.startContainer ? range.startOffset : 0;
+        const end = node === range.endContainer ? range.endOffset : node.length;
+        if (end > start) pieces.push({ node, start, end });
+      }
+      if (!pieces.length) return;
+      pieces.forEach(({ node, start, end }) => {
+        const part = document.createRange();
+        part.setStart(node, start);
+        part.setEnd(node, end);
+        const span = document.createElement('span');
+        span.className = state.markMode === 'highlight' ? 'gpt-highlight' : 'gpt-underline';
+        part.surroundContents(span);
+      });
       sel.removeAllRanges();
       block.contentHtml = blockContentEl.innerHTML;
       block.annotated = true;
@@ -852,85 +900,44 @@
     });
   }
 
-  // ─── Importar conversación existente ─────────────────────────────────────
-  function importExistingConversation() {
-    const turns = getConversationTurns();
-
-    // Reset
-    state.blocks = [];
-    state.notes = [];
-    state.connections = [];
-    state.idCounter = 0;
-    state.pendingParentId = null;
-    lastKnownTurnCount = 0;
-
-    if (turns.length === 0) {
-      renderAllBlocks();
-      saveState();
-      return;
-    }
-
-    // Construir árbol lineal (no tenemos info de bifurcaciones pasadas)
-    let prevId = null;
-    turns.forEach((turn) => {
-      const pos = calcNewBlockPosition(prevId);
-      const block = {
-        id: uid(),
-        userMsg: turn.userMsg,
-        gptMsg: turn.gptMsg,
-        contentHtml: turn.gptMsg ? escapeHtml(turn.gptMsg) : '<span class="gpt-generating">Generando...</span>',
-        annotated: false,
-        parentId: prevId,
-        x: pos.x,
-        y: pos.y,
-        w: BLOCK_W,
-        h: BLOCK_H,
-        minimized: false,
-        highlights: [],
-      };
-      state.blocks.push(block);
-      if (prevId) state.connections.push({ fromId: prevId, toId: block.id });
-      prevId = block.id;
-    });
-
-    lastKnownTurnCount = turns.length;
-    renderAllBlocks();
-    saveState();
+  // Restore first, then reconcile immediately even if the DOM is already idle.
+  function restoreCanvas(delay = 0) {
+    const generation = ++restoreGeneration;
+    clearTimeout(restoreTimer);
+    stopMessageObserver();
+    state.rehydrating = true;
+    restoreTimer = setTimeout(() => {
+      restoreTimer = null;
+      if (!state.enabled || generation !== restoreGeneration) return;
+      loadState(() => {
+        try {
+          injectCanvas();
+          renderAllBlocks();
+          state.rehydrating = false;
+          startMessageObserver();
+          syncMessagesToBlocks();
+        } catch (err) {
+          console.error('[Canvas] No se pudo iniciar el canvas:', err);
+          disableCanvas();
+        }
+      }, generation);
+    }, delay);
   }
 
-  // ─── Enable / Disable ─────────────────────────────────────────────────────
   function enableCanvas() {
-    console.log('[Canvas] enableCanvas() llamado');
+    if (state.enabled) return;
     state.enabled = true;
-    state.rehydrating = true;
     state.currentChatId = getChatId();
     chrome.storage.local.set({ canvasEnabled: true });
-
-    loadState((hadSaved) => {
-      try {
-        injectCanvas();
-      } catch (err) {
-        console.error('[Canvas] Error en injectCanvas:', err);
-        return;
-      }
-      if (hadSaved) {
-        renderAllBlocks();
-        lastKnownTurnCount = state.blocks.length;
-        state.rehydrating = false;
-      } else {
-        setTimeout(() => {
-          importExistingConversation();
-          state.rehydrating = false;
-        }, 500);
-      }
-      startMessageObserver();
-    });
+    restoreCanvas();
   }
 
   function disableCanvas() {
     state.enabled = false;
     state.rehydrating = false;
-    if (messageObserver) messageObserver.disconnect();
+    ++restoreGeneration;
+    clearTimeout(restoreTimer);
+    stopMessageObserver();
     removeCanvas();
     chrome.storage.local.set({ canvasEnabled: false });
   }
@@ -948,30 +955,19 @@
 
   // ─── Detectar cambio de chat (SPA navigation) ─────────────────────────────
   let lastUrl = location.href;
-  const navObserver = new MutationObserver(() => {
-    if (location.href !== lastUrl) {
-      lastUrl = location.href;
-      if (state.enabled) {
-        saveState();
-        state.rehydrating = true;
-        state.currentChatId = getChatId();
-        removeCanvas();
-        setTimeout(() => {
-          loadState((hadSaved) => {
-            injectCanvas();
-            if (hadSaved) {
-              renderAllBlocks();
-              lastKnownTurnCount = state.blocks.length;
-              state.rehydrating = false;
-            } else {
-              importExistingConversation();
-              state.rehydrating = false;
-            }
-          });
-        }, 800); // esperar a que el DOM de ChatGPT se actualice
-      }
+  function checkNavigation() {
+    if (location.href === lastUrl) return;
+    lastUrl = location.href;
+    const chatId = getChatId();
+    if (state.enabled && chatId !== state.currentChatId) {
+      if (!state.rehydrating) saveState();
+      state.currentChatId = chatId;
+      removeCanvas();
+      restoreCanvas(800);
     }
-  });
+  }
+  const navObserver = new MutationObserver(checkNavigation);
+  window.addEventListener('popstate', checkNavigation);
   navObserver.observe(document.body, { childList: true, subtree: true });
 
   // ─── Auto-restore si estaba activo ────────────────────────────────────────

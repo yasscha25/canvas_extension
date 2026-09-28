@@ -6,29 +6,20 @@ Transforma el chat de ChatGPT en un **dashboard visual** con bloques interconect
 
 ## Instalación (modo desarrollador)
 
-### 1. Descargar Fabric.js
-La extensión necesita `fabric.min.js` en la carpeta raíz.
+### 1. Descargar el repositorio
+Descarga el ZIP de la rama que quieras instalar y descomprímelo, o clona el repositorio. La carpeta `extension/` ya incluye los archivos y los iconos necesarios. No necesitas Node.js ni instalar dependencias para usar la extensión.
 
-Descárgalo desde:
-```
-https://cdnjs.cloudflare.com/ajax/libs/fabric.js/5.3.1/fabric.min.js
-```
-Guárdalo como `extension/fabric.min.js`.
+### 2. Cargar en Chrome
+1. Abre Chrome y ve a `chrome://extensions`.
+2. Activa **Modo de desarrollador**.
+3. Haz clic en **Cargar extensión sin empaquetar**.
+4. Selecciona la carpeta `extension/`.
 
-### 2. Crear iconos
-Necesitas 3 archivos PNG en `extension/icons/`:
-- `icon16.png`  — 16×16 px
-- `icon48.png`  — 48×48 px
-- `icon128.png` — 128×128 px
-
-Puedes usar cualquier herramienta online para generarlos (p.ej. https://favicon.io).
-
-### 3. Cargar en Chrome
-1. Abre Chrome y ve a `chrome://extensions`
-2. Activa **Modo de desarrollador** (toggle arriba a la derecha)
-3. Haz clic en **"Cargar extensión sin empaquetar"**
-4. Selecciona la carpeta `extension/`
-5. La extensión aparecerá en la barra de Chrome
+### 3. Actualizar una instalación existente
+1. Sustituye el contenido de la carpeta `extension/` que ya tienes cargada por el de la nueva versión, incluyendo `conversation.js`.
+2. En `chrome://extensions`, pulsa **Recargar** en la tarjeta de ChatGPT Canvas. La versión debe ser **1.0.2**.
+3. Recarga también la pestaña de ChatGPT para que se carguen los nuevos scripts.
+4. Activa el canvas. Las posiciones, notas y anotaciones existentes se recuperan del almacenamiento de la misma extensión.
 
 ### 4. Usar la extensión
 1. Ve a [chatgpt.com](https://chatgpt.com) o [chat.openai.com](https://chat.openai.com)
@@ -43,15 +34,16 @@ Puedes usar cualquier herramienta online para generarlos (p.ej. https://favicon.
 ```
 extension/
 ├── manifest.json       — Configuración de la extensión
+├── conversation.js     — Adaptador DOM: detección por roles y contenido seguro
 ├── content.js          — Núcleo: canvas, bloques, bifurcaciones
 ├── styles.css          — Estilos del dashboard
 ├── popup.html          — UI del popup
 ├── popup.js            — Lógica del popup
-├── fabric.min.js       — ⚠ Debes descargarlo (ver arriba)
+├── fabric.min.js       — Archivo incluido en el repositorio
 └── icons/
-    ├── icon16.png      — ⚠ Debes crearlo
-    ├── icon48.png      — ⚠ Debes crearlo
-    └── icon128.png     — ⚠ Debes crearlo
+    ├── icon16.png
+    ├── icon48.png
+    └── icon128.png
 ```
 
 ---
@@ -78,6 +70,7 @@ extension/
 | ✏ Dibujo | Dibuja libremente sobre el canvas |
 | + / − | Zoom in / out |
 | ⊡ Ajustar | Centra la vista en los bloques |
+| ↻ Detectar | Vuelve a leer los mensajes montados en la página |
 
 ### Persistencia
 - El estado se guarda automáticamente con `chrome.storage.local`
@@ -97,6 +90,36 @@ extension/
 
 ## Limitaciones conocidas
 
-- Si OpenAI cambia los selectores del DOM, la captura de mensajes puede necesitar ajuste en `getConversationTurns()` en `content.js`
+- ChatGPT no ofrece un contrato público para su DOM. El adaptador `conversation.js` admite atributos de autor, `data-turn`, test IDs de mensaje y los artículos antiguos. Puede requerir nuevos ajustes si estos marcadores cambian.
+- Solo se importan mensajes presentes en el DOM. Si ChatGPT monta una parte de un chat largo, los bloques ya capturados se conservan, pero la extensión no descarga el historial que no está montado.
+- Se conservan párrafos, listas, enlaces, tablas y código. Imágenes y componentes interactivos se representan mediante el texto disponible; no se replica su interfaz.
+- Un bloque con resaltados o subrayados conserva su HTML anotado, incluso si después se regenera la respuesta. Esto evita perder las anotaciones existentes.
 - Las bifurcaciones de chats importados (anteriores a activar el canvas) se muestran como árbol lineal; solo las bifurcaciones nuevas crean ramas reales
 - El dibujo libre no persiste entre sesiones (limitación del canvas HTML5 sin serialización adicional)
+
+
+## Corrección 1.0.2 y validación
+
+La lectura agrupa los mensajes por autor y orden del documento, observa cambios de texto durante el streaming y sincroniza los canvas guardados al abrirlos. Los IDs de mensaje evitan actualizar un bloque distinto cuando ChatGPT desmonta turnos anteriores. Las mutaciones creadas por el propio canvas no generan nuevas lecturas.
+
+La respuesta se reconstruye con una lista limitada de etiquetas HTML, sin scripts, estilos, controles, atributos de evento ni enlaces ejecutables. Los bloques tienen scroll propio y permiten resaltar selecciones que atraviesan texto con formato.
+
+Desde la raíz del repositorio, con una versión de Node.js compatible con `package.json`:
+
+```sh
+npm ci
+npm test
+npm run check
+```
+
+Las pruebas usan DOMs simulados con jsdom; no sustituyen la comprobación en una sesión real de ChatGPT. Cubren agrupación, fragmentos múltiples, streaming, hidratación tardía, formato, migración, notas, anotaciones, remontaje y navegación entre chats.
+
+Para una revisión visual local:
+
+```sh
+python -m http.server 8765
+```
+
+Abre `http://localhost:8765/tests/preview.html`. Es una conversación ficticia sin llamadas de red a ChatGPT y con almacenamiento en memoria.
+
+En una sesión real, comprueba una conversación existente, envía una respuesta nueva, prueba la rueda dentro de un bloque y vuelve a otro chat. Si no aparecen mensajes, usa **↻**. La validación del DOM autenticado de ChatGPT queda pendiente de esa comprobación manual.
